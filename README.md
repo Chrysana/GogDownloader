@@ -12,6 +12,10 @@ and run it. The PHP runtime is built in.
 | Linux | `gog-downloader-linux-x86_64` | `chmod +x gog-downloader-linux-x86_64` then `./gog-downloader-linux-x86_64` |
 | Anything else | `gog-downloader.phar` | `php gog-downloader.phar` (requires PHP 8.5 with sqlite, curl and ffi on Windows) |
 
+Every command and flag in this README works the same with every file. The examples below use `gog-downloader`;
+replace it with the name of the file you downloaded, for example `.\gog-downloader.exe download --tag "NEXT_TO_PLAY"`.
+Running the file with no arguments opens the interactive interface. Run it with `list` to see every command.
+
 > The Windows executable is not code signed. If you double click it, Windows SmartScreen may warn you that it's from
 > an unknown publisher (choose *More info* > *Run anyway*). Running `Unblock-File .\gog-downloader.exe` once avoids that.
 
