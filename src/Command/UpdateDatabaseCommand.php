@@ -10,24 +10,34 @@ use App\Enum\MediaType;
 use App\Enum\NamingConvention;
 use App\Enum\OperatingSystem;
 use App\Enum\Setting;
+use App\Exception\InvalidValueException;
 use App\Exception\TooManyRetriesException;
+use App\Service\MachineProgress;
 use App\Service\OwnedItemsManager;
 use App\Service\Persistence\PersistenceManager;
 use App\Service\RetryService;
-use App\Trait\EnumExceptionParserTrait;
+use App\Trait\CommonOptionsTrait;
+use App\Trait\FilteredGamesResolverTrait;
 use App\Trait\MigrationCheckerTrait;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\NullOutput;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Throwable;
 use ValueError;
 
 #[AsCommand('update-database')]
 final class UpdateDatabaseCommand extends Command
 {
-    use EnumExceptionParserTrait;
+    /** how many games are fetched at the same time */
+    private const PARALLEL_GAMES = 6;
+
+    use FilteredGamesResolverTrait; // includes EnumExceptionParserTrait
+    use CommonOptionsTrait;
     use MigrationCheckerTrait;
 
     public function __construct(
@@ -117,6 +127,28 @@ final class UpdateDatabaseCommand extends Command
                 'Set the idle timeout in seconds for http requests',
                 3,
             )
+            ->addOption(
+                name: 'tag',
+                shortcut: 't',
+                mode: InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
+                description: 'Only update games that have this tag in your GOG library. Can be specified multiple times. Case insensitive.',
+            )
+            ->addOption(
+                name: 'without-tag',
+                mode: InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
+                description: 'Skip games that have this tag in your GOG library. Can be specified multiple times. Case insensitive.',
+            )
+            ->addOption(
+                name: 'remove-hidden',
+                mode: InputOption::VALUE_NONE,
+                description: 'Remove games that are hidden in your GOG library from the local database (unless --include-hidden is specified).',
+            )
+            ->addOption(
+                name: 'json-progress',
+                mode: InputOption::VALUE_NONE,
+                description: 'Emit machine readable progress events instead of progress bars (used by the interactive UI).',
+            )
+            ->addIdFileOption()
             ->setAliases(['update'])
         ;
     }
@@ -134,9 +166,38 @@ final class UpdateDatabaseCommand extends Command
             $this->ownedItemsManager->storeGamesData([]);
         }
 
+        $timeout = $input->getOption('idle-timeout');
+        $machine = $input->getOption('json-progress') ? new MachineProgress($output) : MachineProgress::disabled();
+
+        // the library listing is cheap and keeps hidden status and tags up to date
+        $library = $this->retryService->retry(
+            fn () => $this->ownedItemsManager->refreshLibrary(httpTimeout: $timeout),
+            $input->getOption('retry'),
+            $input->getOption('retry-delay'),
+        );
+
+        if ($input->getOption('remove-hidden') && !$input->getOption('include-hidden')) {
+            $stored = $this->ownedItemsManager->getLocalGameData();
+            $kept = array_values(array_filter(
+                $stored,
+                fn (GameDetail $detail) => !($library[$detail->id]->hidden ?? false),
+            ));
+            if (count($kept) !== count($stored)) {
+                $this->ownedItemsManager->storeGamesData($kept);
+                $io->note(sprintf('Removed %d hidden game(s) from the local database', count($stored) - count($kept)));
+            }
+        }
+
+        try {
+            $libraryFilter = $this->getLibraryFilter($input, $output, $this->ownedItemsManager);
+        } catch (InvalidValueException $e) {
+            $io->error($e->getMessage());
+
+            return Command::FAILURE;
+        }
+
         $storedItems = $this->ownedItemsManager->getLocalGameData();
         $storedItemIds = array_map(fn (GameDetail $detail) => $detail->id, $storedItems);
-        $timeout = $input->getOption('idle-timeout');
 
         try {
             $languages = array_map(
@@ -194,38 +255,71 @@ final class UpdateDatabaseCommand extends Command
                 });
                 $count = count($items);
             }
-            $progressBar = null;
-            foreach ($items as $item) {
-                try {
-                    $this->retryService->retry(function () use ($item, $count, $io, &$progressBar) {
-                        if ($progressBar === null) {
-                            $progressBar = $io->createProgressBar($count);
-                            $progressBar->setFormat(
-                                ' %current%/%max% [%bar%] %percent:3s%% - %message%'
+            if ($libraryFilter !== null) {
+                $items = array_filter([...$items], fn (OwnedItemInfo $item) => $libraryFilter($item->getId()));
+                $count = count($items);
+            }
+            if (($ids = $this->getIdFileIds($input)) !== null) {
+                $items = array_filter([...$items], fn (OwnedItemInfo $item) => isset($ids[$item->getId()]));
+                $count = count($items);
+            }
+            $items = array_values([...$items]);
+            $count = count($items);
+            $machine->emit('total', ['games' => $count]);
+            $progressBar = $machine->isEnabled()
+                ? new ProgressBar(new NullOutput(), $count)
+                : $io->createProgressBar($count);
+            $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% - %message%');
+            $index = 0;
+            // several games are fetched at once, all their requests run in parallel
+            foreach (array_chunk($items, self::PARALLEL_GAMES) as $batch) {
+                $batchResults = [];
+                if ($type === MediaType::Game) {
+                    $progressBar->setMessage($batch[0]->getTitle());
+                    try {
+                        $batchResults = $this->ownedItemsManager->getGameDetails($batch, (int) $timeout);
+                    } catch (Throwable) {
+                        // e.g. a login problem, every game is retried on its own below
+                    }
+                }
+
+                foreach ($batch as $item) {
+                    $machine->emit('game', ['id' => $item->getId(), 'title' => $item->getTitle(), 'index' => $index++]);
+                    $progressBar->setMessage($item->getTitle());
+                    $result = array_key_exists($item->getId(), $batchResults) ? $batchResults[$item->getId()] : false;
+
+                    try {
+                        if ($result === false || $result instanceof Throwable) {
+                            // not fetched in the batch or it failed there: fetch on its own, with retries
+                            $result = $this->retryService->retry(
+                                fn () => $this->ownedItemsManager->getItemDetail($item, httpTimeout: (int) $timeout, cached: false),
+                                $input->getOption('retry'),
+                                $input->getOption('retry-delay'),
                             );
-                            $progressBar->setMessage($item->getTitle());
-                            $progressBar->advance();
                         }
-                        $progressBar->setMessage($item->getTitle());
-                        $detail = $this->ownedItemsManager->getItemDetail($item, cached: false);
-                        if ($detail !== null) {
-                            $this->ownedItemsManager->storeSingleGameData($detail);
+                        if ($result !== null) {
+                            $this->ownedItemsManager->storeSingleGameData($result);
                         }
                         $progressBar->advance();
-                    }, $input->getOption('retry'), $input->getOption('retry-delay'));
-                } catch (TooManyRetriesException $e) {
-                    if (!$input->getOption('skip-errors')) {
-                        if (!count($e->exceptions)) {
-                            throw $e;
+                    } catch (TooManyRetriesException $e) {
+                        if (!$input->getOption('skip-errors')) {
+                            if (!count($e->exceptions)) {
+                                throw $e;
+                            }
+                            throw $e->exceptions[array_key_last($e->exceptions)];
                         }
-                        throw $e->exceptions[array_key_last($e->exceptions)];
+                        $progressBar->advance();
+                        $io->note("{$item->getTitle()} couldn't be downloaded");
+                        $machine->emit('done', ['name' => $item->getTitle(), 'status' => 'failed']);
+                        continue;
                     }
-                    $io->note("{$item->getTitle()} couldn't be downloaded");
+                    $machine->emit('done', ['name' => $item->getTitle(), 'status' => 'updated']);
                 }
             }
-            $progressBar?->finish();
+            $progressBar->finish();
         }
 
+        $machine->emit('finished');
         $io->success('Local data successfully updated');
 
         return self::SUCCESS;

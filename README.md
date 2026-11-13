@@ -1,39 +1,74 @@
 # gog-downloader
 
-PHP based tool to download the games you have bought on GOG to your hard drive.
+Tool to download the games you have bought on GOG to your hard drive, with an easy to use text interface
+and a full command line for automation.
 
-Requires `php 8.2+` (with simplexml and json) or `docker`. On Windows you can use an installer that installs all the necessary dependencies.
+**No installation needed:** download a single file from the [releases page](https://github.com/Chrysana/GogDownloader/releases/latest)
+and run it. The PHP runtime is built in.
 
-By default, the games are saved in the directory you run the commands from, you can also specify your own.
+| Platform | File | How to run |
+|---|---|---|
+| Windows | `gog-downloader.exe` | double click it, or run `.\gog-downloader.exe` in PowerShell / Windows Terminal |
+| Linux | `gog-downloader-linux-x86_64` | `chmod +x gog-downloader-linux-x86_64` then `./gog-downloader-linux-x86_64` |
+| Anything else | `gog-downloader.phar` | `php gog-downloader.phar` (requires PHP 8.5 with sqlite, curl and ffi on Windows) |
 
-You can run `gog-downloader help` or `gog-downloader help [subcommand]` for more info.
+> The Windows executable is not code signed. If you double click it, Windows SmartScreen may warn you that it's from
+> an unknown publisher (choose *More info* > *Run anyway*). Running `Unblock-File .\gog-downloader.exe` once avoids that.
 
-> In version 1.11.0, support for downloading DLC was added. It requires storing additional metadata so running
-> a full run of the update command is recommended. It will work even without an update, but the downloads will be slower.
-
-> Since version 1.10.0 a new naming scheme has been adopted, reflecting the official slug values from GOG itself
-> which should make this tool better integrated with other 3rd-party tools. You can continue using the old format
-> but if you wish to migrate to the new one, you can use the [migrate-naming-scheme](#migrate-naming-scheme) command.
-
-> Important: Version 1.6.0 uses a new database format. All newer versions will migrate your existing data
-> but it's not possible to go back from 1.6.0 to a previous version.
+Your login, library information and settings are stored in the directory you run the program from
+(or the one set in the `CONFIG_DIRECTORY` environment variable). Games are downloaded there as well,
+unless you set a different folder.
 
 ## Features
 
-- Choose which games to download based on language, os or search parameters
+- Interactive text interface: browse your library, filter by tags and hidden status, select games, watch progress, log in
+- Choose which games to download based on language, os, GOG library tags, hidden status or search parameters
 - Checks that the downloaded files are valid
 - Resume partially downloaded files instead of downloading them whole again
 - Downloading save files
-- Can be easily put into cron jobs
+- Your GOG login is stored encrypted (Windows DPAPI, or libsodium on other systems)
+- Can be easily put into cron jobs / scheduled tasks
 
-## Usage
+## Interactive interface
+
+Run the program without any arguments (or with `tui`) to open the interface:
+
+```text
+                    GOG Downloader · Library & Download Manager
+
+ Game Library            Search: [bioshock        ]   Tag: ◄  NEXT_TO_PLAY  ►
+                         Hidden: (X) Hide  ( ) Show  ( ) Only
+ Downloads
+                         Sel  Title                                   Size  Tags
+ Update Database         [X]  BioShock Infinite Complete Edition   38.4 GB  NEXT_TO_PLAY
+                         [ ]  BioShock™ Remastered                 no info  NEXT_TO_PLAY
+ Account / Login
+                         Showing 2 of 264 games · 7 hidden · 1 selected
+ Settings                  Download   Update Details   Refresh Library   Select All
+
+ Activity Log
+
+ Exit
+ ● Logged in                                                    Thu 12 Nov 2026 23:47
+```
+
+- **↑ ↓** move, **Enter** open / activate, **Esc** back to the menu, **Tab** next field, **Space** toggle, **F1** help
+- **Account / Login**: opens the GOG login page in your browser, then paste the address you end up on
+- **Game Library**: `Space` selects games, `D` downloads the selection (or everything shown when nothing is selected),
+  `U` fetches file information, `R` refreshes the library list (tags, hidden games), `/` searches, `Enter` shows details
+- **Downloads / Update Database**: live progress, speed and ETA; cancelling is safe, downloads resume next time
+- **Settings**: download folder, platforms, languages, extras, patches, speed limit, folder naming
+
+Long running tasks run in the background, so the interface stays responsive.
+
+## Command line usage
 
 First you need to log in, you can use one of two ways - login via code or username and password:
 
 - `gog-downloader login [username]`
 - `gog-downloader code-login`
 
-After logging in your credentials are stored and will be reused. This app logs in the same way as GOG Galaxy does.
+After logging in your credentials are stored (encrypted) and will be reused. This app logs in the same way as GOG Galaxy does.
 
 Afterwards you need to update your local database:
 
@@ -42,6 +77,48 @@ Afterwards you need to update your local database:
 Afterwards you can start downloading:
 
 - `gog-downloader download [target-directory]`
+
+### Hidden games and tags
+
+Games you've hidden in your GOG library are not added by `update-database` (unless you use `--include-hidden`).
+If you hid them after they were already stored, you can:
+
+- skip them when downloading: `gog-downloader download --skip-hidden`
+- remove them from the local database: `gog-downloader update-database --remove-hidden`
+
+Tags you've created in your GOG library can be used to choose games:
+
+- `gog-downloader tags` lists your tags and how many games use them
+- `gog-downloader download --tag "NEXT_TO_PLAY"` downloads only games with that tag (`--tag` can be repeated)
+- `gog-downloader download --without-tag "Finished"` skips games with that tag
+- the same options work for `update-database` and `total-size`
+
+Hidden status and tags are refreshed every time `update-database` runs (or `tags --refresh`).
+
+### Folder names
+
+By default games are downloaded into folders named after their GOG slug (e.g. `baldurs_gate_2_enhanced_edition`).
+To use the proper game titles instead (e.g. `Baldur's Gate II - Enhanced Edition`), switch the naming scheme -
+this also renames the folders you've already downloaded, so nothing needs to be downloaded again:
+
+- `gog-downloader migrate-naming-scheme --to=title --dry-run` shows what would be renamed
+- `gog-downloader migrate-naming-scheme --to=title` renames the folders and switches the setting
+
+Title folders drop symbols like ® and ™, turn `:` into ` - ` and remove characters Windows doesn't allow.
+If two games would end up with the same folder name, the newer one gets its slug appended.
+Folders that already exist under both names are reported and never merged or overwritten.
+The same option is available in the interactive interface (Settings > Folder names), with a preview.
+
+### Test runs
+
+`gog-downloader download --test-run` does everything except downloading: it selects the games, creates the folders,
+resolves the file names and checks the files you already have, then lists what would be downloaded and where.
+The interactive interface offers the same as the *Test Run* button when you start a download.
+
+### Troubleshooting
+
+`gog-downloader doctor` shows the runtime version, the data directory, whether the login is encrypted and whether
+the interactive interface is supported - please include its output when reporting problems.
 
 ### Logging in via code
 
@@ -246,31 +323,33 @@ As of version 1.9.0, you can configure the storage type to one of the supported 
 
 Read more in the [official AWS documentation](https://aws.amazon.com/s3/storage-classes/).
 
-## Download
+## Download (other options)
 
-If you want to use the docker version, read below.
+Besides the single file executables (see the top of this page), every push to this repository builds them as well:
+open the latest run of the [Build workflow](https://github.com/Chrysana/GogDownloader/actions/workflows/build.yaml)
+and download the artifacts. These have new features sooner, but you may also encounter new bugs.
 
-If your local system has php, you can download the [latest release](https://github.com/RikudouSage/GogDownloader/releases/latest)
-and run it locally, either by using `php gog-downloader` or by running `./gog-downloader`.
+To build it yourself you need PHP 8.5 and composer:
 
-> If you run into permission problems, make the `gog-downloader` file executable by running `chmod +x gog-downloader`
-
-You can also download the latest development version from [here](https://nightly.link/RikudouSage/GogDownloader/workflows/build-latest.yaml/main/gog-downloader.zip).
-This version will have new features sooner than standard release, but you may also encounter new bugs.
+```shell
+composer install --no-dev --optimize-autoloader
+php -d phar.readonly=0 build/build-phar.php
+php gog-downloader.phar
+```
 
 ### Docker
 
-You can use the docker image `rikudousage/gog-downloader`. This is especially suitable for NAS servers
-which often don't have up-to-date packages but support docker.
+A `Dockerfile` is included, which is especially suitable for NAS servers which often don't have up-to-date packages
+but support docker. Build the image from a downloaded (or built) `gog-downloader.phar` placed next to the Dockerfile:
+`docker build -t gog-downloader .` and use `gog-downloader` as the image name in the examples below.
+The image keeps the login encryption key in the `/Configs` volume.
 
 It doesn't offer any configuration, but you can mount two volumes, one for configuration (under `/Configs`)
 and the other for downloads (under `/Downloads`).
 
-You can use specific versions as tags or `latest` (the newest stable version) or `dev` (the newest unstable version).
-
 Example 1:
 
-- `docker run --rm -it --init -v "$(pwd)/Configs:/Configs" -v "$(pwd)/Downloads:/Downloads" rikudousage/gog-downloader:latest`
+- `docker run --rm -it --init -v "$(pwd)/Configs:/Configs" -v "$(pwd)/Downloads:/Downloads" gog-downloader`
 
 Explanation:
 
@@ -284,7 +363,7 @@ Explanation:
 
 Example 2:
 
-- `mkdir -p Configs Downloads; docker run --rm -it --init -v "/etc/passwd:/etc/passwd:ro" -v "$(pwd)/Configs:/Configs" -v "$(pwd)/Downloads:/Downloads" --user $(id -u) rikudousage/gog-downloader:latest`
+- `mkdir -p Configs Downloads; docker run --rm -it --init -v "/etc/passwd:/etc/passwd:ro" -v "$(pwd)/Configs:/Configs" -v "$(pwd)/Downloads:/Downloads" --user $(id -u) gog-downloader`
 
 Explanation:
 
@@ -299,9 +378,9 @@ Explanation:
 
 Typing such commands all the time is tiring, that's why I recommend creating an alias:
 
-- `alias gog-downloader='docker run --rm -it --init -v $(pwd)/Configs:/Configs -v $(pwd)/Downloads:/Downloads rikudousage/gog-downloader:latest'`
+- `alias gog-downloader='docker run --rm -it --init -v $(pwd)/Configs:/Configs -v $(pwd)/Downloads:/Downloads gog-downloader'`
   - this aliases the command `gog-downloader` to the first example
-- `alias gog-downloader='mkdir -p Configs Downloads; docker run --rm -it --init -v /etc/passwd:/etc/passwd:ro -v $(pwd)/Configs:/Configs -v $(pwd)/Downloads:/Downloads --user $(id -u) rikudousage/gog-downloader:latest'`
+- `alias gog-downloader='mkdir -p Configs Downloads; docker run --rm -it --init -v /etc/passwd:/etc/passwd:ro -v $(pwd)/Configs:/Configs -v $(pwd)/Downloads:/Downloads --user $(id -u) gog-downloader'`
   - this aliases the command `gog-downloader` to the second example
 
 Afterwards you can use the `gog-downloader` command the same as if you installed it locally,

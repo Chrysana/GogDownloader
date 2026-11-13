@@ -62,6 +62,85 @@ trait FilteredGamesResolverTrait
     }
 
     /**
+     * @return array<int, true>|null game ids from the file given in --id-file, or null if not specified
+     * @throws InvalidValueException
+     */
+    private function getIdFileIds(InputInterface $input): ?array
+    {
+        $file = $input->hasOption('id-file') ? $input->getOption('id-file') : null;
+        if (!$file) {
+            return null;
+        }
+        if (!is_readable($file)) {
+            throw new InvalidValueException("The id file '{$file}' is not readable.");
+        }
+
+        $ids = [];
+        foreach (preg_split('/\s+/', (string) file_get_contents($file), flags: PREG_SPLIT_NO_EMPTY) as $id) {
+            if (ctype_digit($id)) {
+                $ids[(int) $id] = true;
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Builds a filter based on library metadata (hidden status, tags), or null if no such filter was requested.
+     *
+     * @return (callable(int $gameId): bool)|null
+     */
+    private function getLibraryFilter(
+        InputInterface $input,
+        OutputInterface $output,
+        OwnedItemsManager $ownedItemsManager,
+        bool $refresh = false,
+    ): ?callable {
+        $skipHidden = $input->hasOption('skip-hidden') && $input->getOption('skip-hidden');
+        $tags = $input->hasOption('tag') ? $input->getOption('tag') : [];
+        $withoutTags = $input->hasOption('without-tag') ? $input->getOption('without-tag') : [];
+
+        if (!$skipHidden && !$tags && !$withoutTags) {
+            return null;
+        }
+
+        $library = $refresh ? [] : $ownedItemsManager->getLibrary();
+        if (!count($library)) {
+            if ($output->isVerbose()) {
+                $output->writeln('Fetching library information (hidden games and tags)...');
+            }
+            $library = $ownedItemsManager->refreshLibrary(
+                httpTimeout: (int) ($input->hasOption('idle-timeout') ? $input->getOption('idle-timeout') : 3),
+            );
+        }
+
+        if ($tags) {
+            $knownTags = array_map(mb_strtolower(...), $ownedItemsManager->getTagNames());
+            foreach ($tags as $tag) {
+                if (!in_array(mb_strtolower($tag), $knownTags, true)) {
+                    throw new InvalidValueException("The tag '{$tag}' does not exist in your library. Run the 'tags' command to see the available tags, or 'update-database' if you've created it recently.");
+                }
+            }
+        }
+
+        return function (int $gameId) use ($library, $skipHidden, $tags, $withoutTags): bool {
+            $item = $library[$gameId] ?? null;
+
+            if ($skipHidden && $item?->hidden) {
+                return false;
+            }
+            if ($tags && !array_any($tags, fn (string $tag) => (bool) $item?->hasTag($tag))) {
+                return false;
+            }
+            if ($withoutTags && $item && array_any($withoutTags, fn (string $tag) => $item->hasTag($tag))) {
+                return false;
+            }
+
+            return true;
+        };
+    }
+
+    /**
      * @return iterable<GameDetail>
      * @throws InvalidValueException
      */
@@ -107,6 +186,14 @@ trait FilteredGamesResolverTrait
                 array_map(fn (string $title) => strtolower($title), $without),
                 true,
             ));
+        }
+
+        if (($ids = $this->getIdFileIds($input)) !== null) {
+            $iterable = Iterables::filter($iterable, fn (GameDetail $detail) => isset($ids[$detail->id]));
+        }
+
+        if ($libraryFilter = $this->getLibraryFilter($input, $output, $ownedItemsManager, refresh: (bool) $input->getOption('update'))) {
+            $iterable = Iterables::filter($iterable, fn (GameDetail $detail) => $libraryFilter($detail->id));
         }
 
         if ($excludeLanguage) {

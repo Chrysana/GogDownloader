@@ -144,6 +144,42 @@ trait CommonOptionsTrait
         return $this;
     }
 
+    private function addIdFileOption(): static
+    {
+        $this
+            ->addOption(
+                name: 'id-file',
+                mode: InputOption::VALUE_REQUIRED,
+                description: 'Path to a file with game IDs (one per line), only those games will be processed (used by the interactive UI).',
+            );
+
+        return $this;
+    }
+
+    private function addLibraryFilterOptions(): static
+    {
+        $this
+            ->addOption(
+                name: 'skip-hidden',
+                mode: InputOption::VALUE_NONE,
+                description: 'Skip games that are hidden in your GOG library.',
+            )
+            ->addOption(
+                name: 'tag',
+                shortcut: 't',
+                mode: InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
+                description: 'Only include games that have this tag in your GOG library. Can be specified multiple times, a game matching any of the tags is included. Case insensitive. See the "tags" command for a list.',
+            )
+            ->addOption(
+                name: 'without-tag',
+                mode: InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
+                description: 'Exclude games that have this tag in your GOG library. Can be specified multiple times. Case insensitive.',
+            )
+        ;
+
+        return $this;
+    }
+
     private function addExcludeGameNameFilterOption(): static
     {
         $this

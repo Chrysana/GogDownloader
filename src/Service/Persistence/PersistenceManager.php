@@ -4,6 +4,7 @@ namespace App\Service\Persistence;
 
 use App\DTO\Authorization;
 use App\DTO\GameDetail;
+use App\DTO\LibraryItem;
 use App\Enum\Setting;
 
 interface PersistenceManager
@@ -33,4 +34,16 @@ interface PersistenceManager
     public function getCompressedHash(string $uncompressedHash): ?string;
 
     public function needsMigrating(bool $excludeEmpty = false): bool;
+
+    /**
+     * Replaces the whole stored library listing.
+     *
+     * @param array<LibraryItem> $items
+     */
+    public function storeLibrary(array $items): void;
+
+    /**
+     * @return array<int, LibraryItem> keyed by game id
+     */
+    public function getLibrary(): array;
 }
