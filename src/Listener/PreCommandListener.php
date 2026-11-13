@@ -26,6 +26,10 @@ final readonly class PreCommandListener implements EventSubscriberInterface
 
     public function onConsoleEvent(ConsoleCommandEvent $event): void
     {
+        // child processes spawned by the interactive UI don't need to check (the UI itself does)
+        if (getenv('GOG_DOWNLOADER_CHILD') || $event->getCommand()?->getName() === 'tui') {
+            return;
+        }
         if (!$this->newVersionChecker->newVersionAvailable()) {
             return;
         }

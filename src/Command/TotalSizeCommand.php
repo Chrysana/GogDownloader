@@ -50,6 +50,7 @@ final class TotalSizeCommand extends Command
             ->addHttpIdleTimeoutOption()
             ->addGameNameFilterOption()
             ->addExcludeGameNameFilterOption()
+            ->addLibraryFilterOptions()
             ->addOption(
                 name: 'unit',
                 mode: InputOption::VALUE_REQUIRED,

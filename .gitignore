@@ -5,4 +5,7 @@
 /.php-cs-fixer.cache
 /*.db
 /bin/appversion
-/GogDownloaderSetup.exe
+.tools/
+/gog-downloader.phar
+/gog-downloader.exe
+/gog-downloader-linux-*

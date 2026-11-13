@@ -4,12 +4,15 @@ namespace App\Service\Persistence;
 
 use App\DTO\Authorization;
 use App\DTO\GameDetail;
+use App\DTO\LibraryItem;
 use App\Enum\Setting;
 use App\Service\MigrationManager;
+use App\Service\SecretProtector;
 use App\Service\Serializer;
 use DateTimeImmutable;
 use JetBrains\PhpStorm\ExpectedValues;
 use PDO;
+use Throwable;
 
 final class PersistenceManagerSqlite extends AbstractPersistenceManager
 {
@@ -18,6 +21,7 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
     public function __construct(
         private readonly MigrationManager $migrationManager,
         private readonly Serializer $serializer,
+        private readonly SecretProtector $protector = new SecretProtector(),
     ) {
     }
 
@@ -35,11 +39,25 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
             return null;
         }
 
-        return new Authorization(
-            $result['token'],
-            $result['refreshToken'],
+        $token = $this->protector->unprotect((string) $result['token']);
+        $refreshToken = $this->protector->unprotect((string) $result['refreshToken']);
+        if ($token === null || $refreshToken === null) {
+            // encrypted by a different user / machine, or the key is gone: behave as if logged out
+            return null;
+        }
+
+        $authorization = new Authorization(
+            $token,
+            $refreshToken,
             new DateTimeImmutable($result['validUntil']),
         );
+
+        // stored in plain text by an older version, encrypt it now
+        if (!$this->protector->isProtected((string) $result['token']) && $this->protector->getMethod() !== 'none') {
+            $this->saveAuthorization($authorization);
+        }
+
+        return $authorization;
     }
 
     public function saveAuthorization(?Authorization $authorization): self
@@ -54,8 +72,8 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
 
         $prepared = $pdo->prepare('INSERT INTO auth (token, refreshToken, validUntil) VALUES (?, ?, ?)');
         $prepared->execute([
-            $authorization->token,
-            $authorization->refreshToken,
+            $this->protector->protect($authorization->token),
+            $this->protector->protect($authorization->refreshToken),
             $authorization->validUntil->format('c'),
         ]);
 
@@ -248,6 +266,51 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
         }
 
         return $count > 0;
+    }
+
+    public function storeLibrary(array $items): void
+    {
+        $pdo = $this->getPdo(self::DATABASE);
+        $this->migrationManager->apply($pdo);
+
+        $pdo->beginTransaction();
+        try {
+            $pdo->exec('delete from library');
+            $statement = $pdo->prepare('insert into library (game_id, title, slug, hidden, tags) values (?, ?, ?, ?, ?)');
+            foreach ($items as $item) {
+                $statement->execute([
+                    $item->id,
+                    $item->title,
+                    $item->slug,
+                    (int) $item->hidden,
+                    json_encode(array_values($item->tags), JSON_THROW_ON_ERROR),
+                ]);
+            }
+            $pdo->commit();
+        } catch (Throwable $e) {
+            $pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    public function getLibrary(): array
+    {
+        $pdo = $this->getPdo(self::DATABASE);
+        $this->migrationManager->apply($pdo);
+
+        $result = [];
+        $query = $pdo->query('select * from library order by title collate nocase');
+        while ($row = $query->fetch(PDO::FETCH_ASSOC)) {
+            $result[(int) $row['game_id']] = new LibraryItem(
+                id: (int) $row['game_id'],
+                title: $row['title'],
+                slug: $row['slug'] ?? '',
+                hidden: (bool) $row['hidden'],
+                tags: json_decode($row['tags'] ?: '[]', true) ?: [],
+            );
+        }
+
+        return $result;
     }
 
     private function getPdo(

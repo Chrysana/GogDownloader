@@ -18,15 +18,13 @@ final readonly class RetryService
      * @throws TooManyRetriesException
      * @throws Exception
      */
-    public function retry(callable $callable, int $maxRetries, int $retryDelay, ?array $exceptions = null, ?array $ignoreExceptions = null): void
+    public function retry(callable $callable, int $maxRetries, int $retryDelay, ?array $exceptions = null, ?array $ignoreExceptions = null): mixed
     {
         $retries = 0;
         $thrown = [];
         do {
             try {
-                $callable(count($thrown) ? $thrown[array_key_last($thrown)] : null);
-
-                return;
+                return $callable(count($thrown) ? $thrown[array_key_last($thrown)] : null);
             } catch (Exception $e) {
                 $thrown[] = $e;
                 ++$retries;

@@ -72,6 +72,25 @@ final class AppKernel extends Kernel
 
     private function getAppKey(): string
     {
-        return 'gog-downloader-1';
+        // The container is only rebuilt in debug mode, so the cache key must change whenever the code changes,
+        // otherwise a new version would keep using the container compiled by an older one.
+        $versionFile = __DIR__ . '/../bin/appversion';
+        $version = is_file($versionFile) ? trim((string) file_get_contents($versionFile)) : 'dev';
+        $fingerprint = $version;
+        $files = [__FILE__, __DIR__ . '/../vendor/composer/installed.json', ...(glob(__DIR__ . '/../config/*.yaml') ?: []), ...(glob(__DIR__ . '/../config/packages/*.yaml') ?: [])];
+        foreach ($files as $file) {
+            $fingerprint .= '|' . (@filemtime($file) ?: 0);
+        }
+        if ($version === 'dev') {
+            // in development, adding/removing a class should also invalidate the container
+            $fingerprint .= '|' . (@filemtime(__DIR__ . '/../vendor/composer/autoload_classmap.php') ?: 0);
+            foreach (['Command', 'Service', 'Listener', 'Migration', 'Tui'] as $directory) {
+                foreach (glob(__DIR__ . "/{$directory}/*.php") ?: [] as $file) {
+                    $fingerprint .= '|' . $file . (@filemtime($file) ?: 0);
+                }
+            }
+        }
+
+        return 'gog-downloader-' . substr(hash('xxh3', $fingerprint), 0, 12);
     }
 }

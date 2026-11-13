@@ -17,6 +17,7 @@ use App\Helper\LatelyBoundStringValue;
 use App\Service\DownloadManager;
 use App\Service\FileWriter\FileWriterLocator;
 use App\Service\Iterables;
+use App\Service\MachineProgress;
 use App\Service\OwnedItemsManager;
 use App\Service\Persistence\PersistenceManager;
 use App\Service\RetryService;
@@ -33,6 +34,7 @@ use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\NullOutput;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\HttpClient\Exception\ClientException;
@@ -95,6 +97,7 @@ final class DownloadCommand extends Command
             )
             ->addGameNameFilterOption()
             ->addExcludeGameNameFilterOption()
+            ->addLibraryFilterOptions()
             ->addOption(
                 name: 'bandwidth',
                 shortcut: 'b',
@@ -127,6 +130,17 @@ final class DownloadCommand extends Command
                 mode: InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
                 description: 'Skip a download by its name, can be specified multiple times.'
             )
+            ->addOption(
+                name: 'json-progress',
+                mode: InputOption::VALUE_NONE,
+                description: 'Emit machine readable progress events instead of progress bars (used by the interactive UI).',
+            )
+            ->addOption(
+                name: 'test-run',
+                mode: InputOption::VALUE_NONE,
+                description: 'Do everything except transferring files: select the games, create the folders, resolve file names and check existing files, then report what would be downloaded.',
+            )
+            ->addIdFileOption()
             ->addOption(
                 name: 'remove-invalid',
                 mode: InputOption::VALUE_NONE,
@@ -169,15 +183,27 @@ final class DownloadCommand extends Command
             $noVerify = $input->getOption('no-verify');
             $skipExistingExtras = $input->getOption('skip-existing-extras');
             $iterable = $this->getGames($input, $output, $this->ownedItemsManager);
+            $machine = $input->getOption('json-progress') ? new MachineProgress($output) : MachineProgress::disabled();
 
             $downloadsToSkip = $input->getOption('skip-download');
             $removeInvalid = $input->getOption('remove-invalid');
             $withoutGames = $input->getOption('no-games');
             $withoutPatches = $input->getOption('no-patches');
             $includeExtras = $input->getOption('extras');
+            $testRun = (bool) $input->getOption('test-run');
+            $testRunTotals = ['files' => 0, 'bytes' => 0, 'upToDate' => 0];
+            if ($testRun) {
+                $io->note('Test run: folders are created and existing files are checked, but nothing is downloaded.');
+            }
 
             $this->dispatchSignals();
+            if ($machine->isEnabled()) {
+                $iterable = [...$iterable];
+                $machine->emit('total', ['games' => count($iterable)]);
+            }
+            $gameIndex = 0;
             foreach ($iterable as $game) {
+                $machine->emit('game', ['id' => $game->id, 'title' => $game->title, 'index' => $gameIndex++]);
                 $downloads = [];
                 if (!$withoutGames) {
                     $downloads = [...$downloads, ...$game->downloads];
@@ -193,8 +219,15 @@ final class DownloadCommand extends Command
                 }
 
                 foreach ($downloads as $download) {
+                    $fileLabel = $download instanceof GameInstaller
+                        ? "{$download->name} ({$download->platform}, {$download->language})"
+                        : "{$download->name} (extra)";
                     try {
-                        $this->retryService->retry(function (?Throwable $retryReason) use (
+                        $status = $this->retryService->retry(function (?Throwable $retryReason) use (
+                            $testRun,
+                            &$testRunTotals,
+                            $machine,
+                            $fileLabel,
                             $removeInvalid,
                             $downloadsToSkip,
                             $skipExistingExtras,
@@ -230,7 +263,7 @@ final class DownloadCommand extends Command
 
                             $this->canKillSafely = false;
                             $this->dispatchSignals();
-                            $progress = $io->createProgressBar();
+                            $progress = $machine->isEnabled() ? new ProgressBar(new NullOutput()) : $io->createProgressBar();
                             $progress->setMessage('Starting...');
                             ProgressBar::setPlaceholderFormatterDefinition(
                                 'bytes_current',
@@ -304,6 +337,12 @@ final class DownloadCommand extends Command
                                     }
 
                                     if ($existingSize > $expectedSize) {
+                                        if ($testRun) {
+                                            $io->warning("{$downloadTag}: Test run: the existing file is larger than expected" . ($removeInvalid ? ', it would be removed and downloaded again.' : '; it would be left alone (use --remove-invalid to replace it).'));
+                                            $machine->emit('test', ['game' => $game->title, 'name' => $fileLabel, 'path' => $this->formatTargetFile($targetFile), 'size' => (int) $download->size, 'startAt' => 0, 'action' => 'invalid']);
+
+                                            return $removeInvalid ? 'would-download' : 'skipped';
+                                        }
                                         if ($removeInvalid && !$retryReason instanceof RetryDownloadForUnmatchingHashException) {
                                             $io->warning("{$downloadTag}: Existing file is larger than expected. The file will be removed and the process retried.");
                                             $writer->remove($targetFile);
@@ -321,9 +360,37 @@ final class DownloadCommand extends Command
                                 }
                             }
 
+                            if ($testRun) {
+                                $size = (int) $download->size;
+                                $remaining = max(0, $size - ($startAt ?? 0));
+                                $testRunTotals['files']++;
+                                $testRunTotals['bytes'] += $remaining;
+                                $action = $startAt ? sprintf('resume from %s', $this->formatBytes($startAt)) : 'download';
+                                if (!$machine->isEnabled()) {
+                                    $io->writeln(sprintf(
+                                        '%s: would %s (%s) -> %s',
+                                        $downloadTag,
+                                        $action,
+                                        $this->formatBytes($size),
+                                        $this->formatTargetFile($targetFile),
+                                    ));
+                                }
+                                $machine->emit('test', [
+                                    'game' => $game->title,
+                                    'name' => $fileLabel,
+                                    'path' => $this->formatTargetFile($targetFile),
+                                    'size' => $size,
+                                    'startAt' => $startAt ?? 0,
+                                    'action' => $startAt ? 'resume' : 'download',
+                                ]);
+
+                                return $startAt ? 'would-resume' : 'would-download';
+                            }
+
                             $progress->setMaxSteps(0);
                             $progress->setProgress(0);
                             $progress->setMessage($downloadTag);
+                            $machine->emit('file', ['game' => $game->title, 'name' => $fileLabel, 'size' => (int) $download->size, 'startAt' => $startAt ?? 0]);
 
                             $curlOptions = [];
                             if ($input->getOption('bandwidth') && defined('CURLOPT_MAX_RECV_SPEED_LARGE')) {
@@ -336,10 +403,11 @@ final class DownloadCommand extends Command
 
                             $responses = $this->downloadManager->download(
                                 download: $download,
-                                callback: function (int $current, int $total) use ($startAt, $progress, $output) {
+                                callback: function (int $current, int $total) use ($startAt, $progress, $machine) {
                                     if ($total > 0) {
                                         $progress->setMaxSteps($total + ($startAt ?? 0));
                                         $progress->setProgress($current + ($startAt ?? 0));
+                                        $machine->progress($current + ($startAt ?? 0), $total + ($startAt ?? 0));
                                     }
                                 },
                                 startAt: $startAt,
@@ -395,7 +463,11 @@ final class DownloadCommand extends Command
                             }
 
                             $progress->finish();
-                            $io->newLine();
+                            if (!$machine->isEnabled()) {
+                                $io->newLine();
+                            }
+
+                            return 'downloaded';
                         }, maxRetries: $input->getOption('retry'), retryDelay: $input->getOption('retry-delay'), ignoreExceptions: [
                             InvalidValueException::class,
                             ExitException::class,
@@ -408,9 +480,28 @@ final class DownloadCommand extends Command
                             throw $e->exceptions[array_key_last($e->exceptions)];
                         }
                         $io->note("{$download->name} couldn't be downloaded");
+                        $machine->emit('done', ['game' => $game->title, 'name' => $fileLabel, 'status' => 'failed']);
+                        continue;
                     }
+                    $status ??= 'skipped';
+                    if ($testRun && $status === 'skipped') {
+                        ++$testRunTotals['upToDate'];
+                    }
+                    $machine->emit('done', ['game' => $game->title, 'name' => $fileLabel, 'status' => $status]);
                 }
             }
+
+            if ($testRun) {
+                $machine->emit('summary', $testRunTotals);
+                $io->success(sprintf(
+                    'Test run finished: %d file(s) would be downloaded (%s), %d already up to date or skipped. Nothing was downloaded.',
+                    $testRunTotals['files'],
+                    $this->formatBytes($testRunTotals['bytes']),
+                    $testRunTotals['upToDate'],
+                ));
+            }
+
+            $machine->emit('finished');
 
             return self::SUCCESS;
         } catch (ExitException $e) {
@@ -502,6 +593,18 @@ final class DownloadCommand extends Command
         }
 
         throw new InvalidArgumentException("Unsupported bandwidth format: {$bandwidth}");
+    }
+
+    private function formatBytes(int|float $bytes): string
+    {
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        $unit = 0;
+        while ($bytes >= 1024 && $unit < count($units) - 1) {
+            $bytes /= 1024;
+            ++$unit;
+        }
+
+        return ($unit === 0 ? (string) (int) $bytes : number_format($bytes, 1)) . ' ' . $units[$unit];
     }
 
     private function formatTargetFile(object $targetFile): string

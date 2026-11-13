@@ -1,0 +1,186 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PHP_VERSION: '8.5'
+  # static-php-cli release used to build the self-contained executables
+  SPC_VERSION: '2.8.5'
+  # extensions compiled into the executables (the windows build additionally gets ffi for the interactive interface)
+  PHP_EXTENSIONS: 'ctype,curl,dom,filter,iconv,mbstring,openssl,pdo,pdo_sqlite,phar,simplexml,sodium,sqlite3,tokenizer,xml,zlib'
+
+jobs:
+  phar:
+    name: Build phar
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_sqlite, ffi
+          ini-values: phar.readonly=0
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "$VERSION" > bin/appversion
+      - name: Install dependencies
+        run: composer install --no-dev --optimize-autoloader --no-interaction --no-progress
+      - name: Build phar
+        run: php build/build-phar.php gog-downloader.phar
+      - name: Smoke test
+        run: |
+          php gog-downloader.phar --version
+          php gog-downloader.phar list
+          CONFIG_DIRECTORY="$RUNNER_TEMP" php gog-downloader.phar doctor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gog-downloader-phar
+          path: gog-downloader.phar
+
+  windows:
+    name: Build Windows executable
+    needs: phar
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gog-downloader-phar
+      - name: Download static-php-cli
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force spc | Out-Null
+          Invoke-WebRequest "https://github.com/crazywhalecc/static-php-cli/releases/download/${env:SPC_VERSION}/spc-windows-x64.exe" -OutFile spc\spc.exe
+      - name: Cache sources and build tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            spc/downloads
+            spc/php-sdk-binary-tools
+            spc/pkgroot
+          key: spc-windows-${{ env.SPC_VERSION }}-${{ env.PHP_VERSION }}-${{ hashFiles('.github/workflows/build.yaml') }}-${{ github.run_id }}
+          restore-keys: |
+            spc-windows-${{ env.SPC_VERSION }}-${{ env.PHP_VERSION }}-${{ hashFiles('.github/workflows/build.yaml') }}-
+      - name: Build PHP runtime
+        shell: pwsh
+        working-directory: spc
+        run: |
+          $extensions = "${env:PHP_EXTENSIONS},ffi"
+          .\spc.exe doctor --auto-fix
+          # always fetch the latest PHP 8.5 release so security fixes are included
+          .\spc.exe download php-src --with-php=${env:PHP_VERSION} --ignore-cache-sources=php-src
+          .\spc.exe download --for-extensions="$extensions" --with-php=${env:PHP_VERSION} --prefer-pre-built
+          .\spc.exe build "$extensions" --build-micro
+      - name: Create executable
+        shell: pwsh
+        run: |
+          .\spc\spc.exe micro:combine gog-downloader.phar --output=gog-downloader.exe --with-micro=spc\buildroot\bin\micro.sfx -I "ffi.enable=1" -I "memory_limit=-1"
+          if (-not (Test-Path gog-downloader.exe)) { throw 'micro:combine did not produce the executable' }
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $env:CONFIG_DIRECTORY = $env:RUNNER_TEMP
+          .\gog-downloader.exe --version
+          .\gog-downloader.exe list
+          $doctor = .\gog-downloader.exe doctor --no-ansi | Out-String
+          Write-Output $doctor
+          if ($LASTEXITCODE -ne 0) { throw 'doctor failed' }
+          if ($doctor -notmatch 'Interactive UI\s+supported') { throw 'FFI is not available, the interactive UI would not work' }
+          if ($doctor -notmatch 'Storage\s+sqlite') { throw 'sqlite is not available' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gog-downloader-windows
+          path: gog-downloader.exe
+
+  linux:
+    name: Build Linux executable
+    needs: phar
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gog-downloader-phar
+      - name: Download static-php-cli
+        run: |
+          mkdir -p spc
+          curl -fsSL "https://github.com/crazywhalecc/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-x86_64.tar.gz" | tar -xz -C spc
+          chmod +x spc/spc
+      - name: Cache sources
+        uses: actions/cache@v4
+        with:
+          path: spc/downloads
+          key: spc-linux-${{ env.SPC_VERSION }}-${{ env.PHP_VERSION }}-${{ hashFiles('.github/workflows/build.yaml') }}-${{ github.run_id }}
+          restore-keys: |
+            spc-linux-${{ env.SPC_VERSION }}-${{ env.PHP_VERSION }}-${{ hashFiles('.github/workflows/build.yaml') }}-
+      - name: Build PHP runtime
+        working-directory: spc
+        run: |
+          ./spc doctor --auto-fix
+          ./spc download php-src --with-php=${PHP_VERSION} --ignore-cache-sources=php-src
+          ./spc download --for-extensions="${PHP_EXTENSIONS}" --with-php=${PHP_VERSION} --prefer-pre-built
+          ./spc build "${PHP_EXTENSIONS}" --build-micro
+      - name: Create executable
+        run: |
+          ./spc/spc micro:combine gog-downloader.phar --output=gog-downloader-linux-x86_64 --with-micro=spc/buildroot/bin/micro.sfx -I "memory_limit=-1"
+          chmod +x gog-downloader-linux-x86_64
+      - name: Smoke test
+        run: |
+          ./gog-downloader-linux-x86_64 --version
+          CONFIG_DIRECTORY="$RUNNER_TEMP" ./gog-downloader-linux-x86_64 doctor --no-ansi | tee doctor.txt
+          grep -Eq 'Storage +sqlite' doctor.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gog-downloader-linux
+          path: gog-downloader-linux-x86_64
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [phar, windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum gog-downloader.exe gog-downloader-linux-x86_64 gog-downloader.phar > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ needs.phar.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            **Windows:** download `gog-downloader.exe` and run it from a terminal (or double click it) - no installation needed.
+            **Linux:** download `gog-downloader-linux-x86_64`, make it executable (`chmod +x`) and run it.
+            **Other platforms:** `gog-downloader.phar` runs on any system with PHP ${{ env.PHP_VERSION }} (`php gog-downloader.phar`).
+
+            Running it without arguments opens the interactive interface, run it with `list` to see all commands.
+          files: |
+            dist/gog-downloader.exe
+            dist/gog-downloader-linux-x86_64
+            dist/gog-downloader.phar
+            dist/SHA256SUMS.txt

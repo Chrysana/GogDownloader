@@ -1,5 +1,7 @@
 framework:
   http_client:
+    # allows fetching the details of several games in parallel (the default is 6)
+    max_host_connections: 16
     default_options:
       http_version: '1.1'
       headers:
