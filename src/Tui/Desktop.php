@@ -11,6 +11,14 @@ use Throwable;
 final class Desktop
 {
     /**
+     * shell32 and ole32 stay loaded for the lifetime of the process: ShellExecute leaves threads running code from
+     * these libraries, and unloading them (which happens when the FFI instance is freed) crashes the process
+     */
+    private static ?FFI $shell32 = null;
+
+    private static ?FFI $ole32 = null;
+
+    /**
      * @return bool whether the link was handed to the system successfully
      */
     public static function openUrl(string $url): bool
@@ -59,31 +67,31 @@ final class Desktop
         }
 
         try {
-            $ole32 = FFI::cdef('long CoInitializeEx(void* pvReserved, unsigned long dwCoInit);', 'ole32.dll');
-            // COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE, as recommended for ShellExecute
-            $ole32->CoInitializeEx(null, 0x2 | 0x4);
+            if (self::$shell32 === null) {
+                self::$ole32 = FFI::cdef('long CoInitializeEx(void* pvReserved, unsigned long dwCoInit);', 'ole32.dll');
+                // COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE, as recommended for ShellExecute
+                self::$ole32->CoInitializeEx(null, 0x2 | 0x4);
+                self::$shell32 = FFI::cdef(
+                    'typedef unsigned long long uintptr_t;'
+                    . 'uintptr_t ShellExecuteW(void* hwnd, const unsigned short* lpOperation, const unsigned short* lpFile, const unsigned short* lpParameters, const unsigned short* lpDirectory, int nShowCmd);',
+                    'shell32.dll',
+                );
+            }
+            $operation = self::wideString(self::$shell32, 'open');
+            $file = self::wideString(self::$shell32, $url);
 
-            $shell32 = FFI::cdef(
-                'void* ShellExecuteW(void* hwnd, const unsigned short* lpOperation, const unsigned short* lpFile, const unsigned short* lpParameters, const unsigned short* lpDirectory, int nShowCmd);',
-                'shell32.dll',
-            );
-            $operation = self::wideString('open');
-            $file = self::wideString($url);
-            // SW_SHOWNORMAL
-            $result = $shell32->ShellExecuteW(null, $operation, $file, null, null, 1);
-
-            // values above 32 indicate success
-            return FFI::cast('uintptr_t', $result)->cdata > 32;
+            // SW_SHOWNORMAL; values above 32 indicate success
+            return self::$shell32->ShellExecuteW(null, $operation, $file, null, null, 1) > 32;
         } catch (Throwable) {
             return false;
         }
     }
 
-    private static function wideString(string $value): FFI\CData
+    private static function wideString(FFI $ffi, string $value): FFI\CData
     {
         $encoded = mb_convert_encoding($value, 'UTF-16LE', 'UTF-8') . "\0\0";
         $length = intdiv(strlen($encoded), 2);
-        $buffer = FFI::new("unsigned short[{$length}]", false);
+        $buffer = $ffi->new("unsigned short[{$length}]");
         FFI::memcpy($buffer, $encoded, strlen($encoded));
 
         return $buffer;
