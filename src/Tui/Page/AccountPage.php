@@ -5,6 +5,7 @@ namespace App\Tui\Page;
 use App\Service\WebAuthentication;
 use App\Tui\App;
 use App\Tui\Canvas;
+use App\Tui\Desktop;
 use App\Tui\Theme;
 use App\Tui\Widget\Button;
 use App\Tui\Widget\TextInput;
@@ -13,6 +14,8 @@ use Throwable;
 final class AccountPage extends Page
 {
     private Button $open;
+
+    private Button $copy;
 
     private TextInput $code;
 
@@ -26,6 +29,7 @@ final class AccountPage extends Page
     {
         parent::__construct($app);
         $this->open = $this->form->add(new Button('Open GOG Login Page', $this->openBrowser(...)));
+        $this->copy = $this->form->add(new Button('Copy Link', $this->copyLink(...)));
         $this->code = $this->form->add(new TextInput(40, onSubmit: fn () => $this->doLogin(), placeholder: 'paste the address here'));
         $this->login = $this->form->add(new Button('Log In', $this->doLogin(...)));
         $this->check = $this->form->add(new Button('Check Login', $this->checkLogin(...)));
@@ -65,6 +69,8 @@ final class AccountPage extends Page
 
         $this->open->x = $x + 2;
         $this->open->y = $row;
+        $this->copy->x = $this->open->x + $this->open->getWidth() + 2;
+        $this->copy->y = $row;
         $row += 2;
 
         $canvas->text($x + 2, $row, 'Address or code:', Theme::LABEL);
@@ -83,7 +89,7 @@ final class AccountPage extends Page
         $this->logout->enabled = $loggedIn;
         $row += 2;
 
-        $canvas->text($x, $row, 'If the browser does not open, visit this address manually:', Theme::DIM, $width);
+        $canvas->text($x, $row, 'If the browser does not open, use Copy Link or visit this address manually:', Theme::DIM, $width);
         $url = WebAuthentication::AUTH_URL;
         foreach (str_split($url, max(10, $width)) as $index => $part) {
             $canvas->text($x, $row + 1 + $index, $part, Theme::INFO);
@@ -94,22 +100,23 @@ final class AccountPage extends Page
 
     private function openBrowser(): void
     {
-        $url = WebAuthentication::AUTH_URL;
-        // an array command bypasses the shell, so the & and % characters in the url are passed as is
-        $command = match (PHP_OS_FAMILY) {
-            'Windows' => ['rundll32', 'url.dll,FileProtocolHandler', $url],
-            'Darwin' => ['open', $url],
-            default => ['xdg-open', $url],
-        };
-        $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
-        $process = @proc_open($command, [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']], $pipes);
-        if ($process === false) {
-            $this->app->showMessage('Browser', 'Could not open the browser, please visit the address shown below manually.');
+        if (!Desktop::openUrl(WebAuthentication::AUTH_URL)) {
+            $this->app->showMessage('Browser', 'Could not open the browser. Use Copy Link and paste the address into your browser.');
 
             return;
         }
-        proc_close($process);
         $this->app->log('Opened the GOG login page in the browser.');
+        $this->form->focus($this->code);
+    }
+
+    private function copyLink(): void
+    {
+        if (!Desktop::copyToClipboard(WebAuthentication::AUTH_URL)) {
+            $this->app->showMessage('Clipboard', 'Could not copy to the clipboard, please copy the address shown below manually.');
+
+            return;
+        }
+        $this->app->log('Copied the GOG login page address to the clipboard.');
         $this->form->focus($this->code);
     }
 

@@ -96,9 +96,10 @@ final class Job
     {
         $phar = class_exists(Phar::class) ? Phar::running(false) : '';
         if ($phar !== '') {
-            // a self-contained binary (php runtime with the phar appended) runs the phar by itself
-            if (realpath($phar) === realpath(PHP_BINARY)) {
-                return [PHP_BINARY];
+            // a self-contained binary (php runtime with the phar appended) runs the phar by itself;
+            // its runtime (the micro sapi) leaves PHP_BINARY empty, which must not end up as the command
+            if (PHP_SAPI === 'micro' || PHP_BINARY === '' || realpath($phar) === realpath(PHP_BINARY)) {
+                return [realpath($phar) ?: $phar];
             }
 
             return [PHP_BINARY, $phar];
