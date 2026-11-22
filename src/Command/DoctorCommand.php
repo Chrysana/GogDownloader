@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\Factory\HttpClientFactory;
 use App\Service\Factory\PersistenceManagerFactory;
 use App\Service\Persistence\PersistenceManager;
 use App\Service\Persistence\PersistenceManagerSqlite;
@@ -42,6 +43,7 @@ final class DoctorCommand extends Command
             ['Data directory' => $_ENV['CONFIG_DIRECTORY'] ?? getcwd()],
             ['Storage' => $this->persistence instanceof PersistenceManagerSqlite ? 'sqlite' : 'files (sqlite not available)'],
             ['SQLite available' => PersistenceManagerFactory::isSqliteAvailable() ? 'yes' : 'no'],
+            ['HTTP client' => new \ReflectionClass(HttpClientFactory::create())->getShortName()],
             ['FFI' => extension_loaded('ffi') ? 'yes (ffi.enable=' . ini_get('ffi.enable') . ')' : 'no'],
             ['Interactive UI' => $tuiSupported ? 'supported' : 'not supported'],
             ['Missing extensions' => count($missing) ? implode(', ', $missing) : 'none'],

@@ -4,6 +4,7 @@ namespace App;
 
 use App\DependencyInjection\CommandLocatorCompilerPass;
 use App\DependencyInjection\EventCoordinatorCompilerPass;
+use App\DependencyInjection\HttpClientCompilerPass;
 use Closure;
 use Symfony\Bundle\FrameworkBundle\FrameworkBundle;
 use Symfony\Component\Config\Loader\LoaderInterface;
@@ -68,6 +69,7 @@ final class AppKernel extends Kernel
     {
         $container->addCompilerPass(new CommandLocatorCompilerPass());
         $container->addCompilerPass(new EventCoordinatorCompilerPass());
+        $container->addCompilerPass(new HttpClientCompilerPass());
     }
 
     private function getAppKey(): string
