@@ -27,7 +27,7 @@ updates:
         patterns:
           - '*'
 
-  # php base image of the Docker build
+  # php base image of the Docker build, pinned to an exact patch so PHP security releases show up as pull requests
   - package-ecosystem: docker
     directory: /
     schedule:

@@ -1,4 +1,6 @@
-FROM php:8.5-alpine
+# exact version so Dependabot opens a pull request for every PHP patch (security) release;
+# when it does, cut a new release: the executables pick up the latest PHP 8.5 patch at build time
+FROM php:8.5.13-alpine
 
 ENV CONFIG_DIRECTORY=/Configs
 ENV DOWNLOAD_DIRECTORY=/Downloads
