@@ -136,57 +136,16 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
         $pdo = $this->getPdo(self::DATABASE);
         $this->migrationManager->apply($pdo);
 
-        $pdo->prepare(
-            'insert into games (title, cd_key, game_id, slug)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT DO UPDATE SET title   = excluded.title,
-                                             cd_key  = excluded.cd_key,
-                                             game_id = excluded.game_id,
-                                             slug    = excluded.slug
-                   '
-        )->execute([
-            $detail->title,
-            $detail->cdKey ?: null,
-            $detail->id,
-            $detail->slug,
-        ]);
+        // one transaction per game: a single disk sync instead of one per row (much faster on slow drives),
+        // and an interrupted update never leaves a game without its downloads
+        $pdo->beginTransaction();
 
-        $query = $pdo->prepare('select id from games where game_id = ?');
-        $query->execute([$detail->id]);
-        $id = $query->fetch(PDO::FETCH_ASSOC)['id'];
-
-        $pdo->prepare('delete from downloads where game_id = ?')->execute([$id]);
-        foreach ($detail->downloads as $download) {
-            $pdo->prepare('insert into downloads (language, platform, name, size, url, md5, game_id, gog_game_id, is_patch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')->execute([
-                $download->language,
-                $download->platform,
-                $download->name,
-                $download->size,
-                $download->url,
-                $download->md5,
-                $id,
-                $download->gogGameId,
-                (int) $download->isPatch,
-            ]);
-        }
-        foreach ($detail->extras as $extra) {
-            $pdo->prepare('insert into game_extras (extra_id, name, size, url, gog_game_id, game_id, md5)
-                                 values (?, ?, ?, ?, ?, ?, ?)
-                                 on conflict (extra_id) do update set name        = excluded.name,
-                                                                      size        = excluded.size,
-                                                                      url         = excluded.url,
-                                                                      gog_game_id = excluded.gog_game_id,
-                                                                      game_id     = excluded.game_id,
-                                                                      md5         = excluded.md5
-            ')->execute([
-                $extra->id,
-                $extra->name,
-                $extra->size,
-                $extra->url,
-                $extra->gogGameId,
-                $id,
-                $extra->md5,
-            ]);
+        try {
+            $this->writeGameDetail($pdo, $detail);
+            $pdo->commit();
+        } catch (Throwable $e) {
+            $pdo->rollBack();
+            throw $e;
         }
     }
 
@@ -274,6 +233,7 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
         $this->migrationManager->apply($pdo);
 
         $pdo->beginTransaction();
+
         try {
             $pdo->exec('delete from library');
             $statement = $pdo->prepare('insert into library (game_id, title, slug, hidden, tags) values (?, ?, ?, ?, ?)');
@@ -311,6 +271,62 @@ final class PersistenceManagerSqlite extends AbstractPersistenceManager
         }
 
         return $result;
+    }
+
+    private function writeGameDetail(PDO $pdo, GameDetail $detail): void
+    {
+        $pdo->prepare(
+            'insert into games (title, cd_key, game_id, slug)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT DO UPDATE SET title   = excluded.title,
+                                             cd_key  = excluded.cd_key,
+                                             game_id = excluded.game_id,
+                                             slug    = excluded.slug
+                   '
+        )->execute([
+            $detail->title,
+            $detail->cdKey ?: null,
+            $detail->id,
+            $detail->slug,
+        ]);
+
+        $query = $pdo->prepare('select id from games where game_id = ?');
+        $query->execute([$detail->id]);
+        $id = $query->fetch(PDO::FETCH_ASSOC)['id'];
+
+        $pdo->prepare('delete from downloads where game_id = ?')->execute([$id]);
+        foreach ($detail->downloads as $download) {
+            $pdo->prepare('insert into downloads (language, platform, name, size, url, md5, game_id, gog_game_id, is_patch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')->execute([
+                $download->language,
+                $download->platform,
+                $download->name,
+                $download->size,
+                $download->url,
+                $download->md5,
+                $id,
+                $download->gogGameId,
+                (int) $download->isPatch,
+            ]);
+        }
+        foreach ($detail->extras as $extra) {
+            $pdo->prepare('insert into game_extras (extra_id, name, size, url, gog_game_id, game_id, md5)
+                                 values (?, ?, ?, ?, ?, ?, ?)
+                                 on conflict (extra_id) do update set name        = excluded.name,
+                                                                      size        = excluded.size,
+                                                                      url         = excluded.url,
+                                                                      gog_game_id = excluded.gog_game_id,
+                                                                      game_id     = excluded.game_id,
+                                                                      md5         = excluded.md5
+            ')->execute([
+                $extra->id,
+                $extra->name,
+                $extra->size,
+                $extra->url,
+                $extra->gogGameId,
+                $id,
+                $extra->md5,
+            ]);
+        }
     }
 
     private function getPdo(
